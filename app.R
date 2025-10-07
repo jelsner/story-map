@@ -1,4 +1,5 @@
-# app.R — minimal, robust story map (no sf), clickable chapters + progress bar
+# app.R — all-cause mortality around storm exposure
+
 options(shiny.fullstacktrace = TRUE)
 
 library(sf)
@@ -47,7 +48,7 @@ chapters <- data.frame(
   stringsAsFactors = FALSE
 )
 
-# ---- Data ------------------------------------------
+# ---- Data ---------------------------------------------------------------------
 # Hurricanes
 hurricanes_raw <- sf::st_read("data/hurricanes.gpkg", layer = "hurricanes", quiet = TRUE)
 hurricanes <- poly_only_4326(hurricanes_raw, geom_col = if ("geom" %in% names(hurricanes_raw)) "geom" else NULL)
@@ -76,7 +77,7 @@ zcta_counts <- zcta_counts %>%
     total   = as.numeric(total)
   )
 
-# RR by ZCTA: read raw, flatten, then join to zcta_counts geometry
+# RR by ZCTA: read raw, flatten, join to zcta_counts geometry
 pluck1_num <- function(x) {
   if (!is.list(x)) return(suppressWarnings(as.numeric(x)))
   vapply(x, function(el) {
@@ -85,10 +86,8 @@ pluck1_num <- function(x) {
     suppressWarnings(as.numeric(el))
   }, numeric(1))
 }
-
 rr_raw <- readRDS("data/zcta_results.rds")
 if (!inherits(rr_raw, "sf")) rr_raw <- sf::st_as_sf(rr_raw)
-
 rr_attr <- rr_raw |>
   sf::st_drop_geometry() |>
   mutate(
@@ -97,7 +96,6 @@ rr_attr <- rr_raw |>
     RR_Impact  = pluck1_num(RR_Impact),
     RR_Cleanup = pluck1_num(RR_Cleanup)
   )
-
 rr_zcta <- zcta_counts |>
   select(GEOID20, geometry) |>
   left_join(rr_attr, by = "GEOID20") |>
@@ -111,7 +109,6 @@ storm_pal <- colorFactor(
   palette = c("Andrew"="#1f77b4", "Charley"="#ff7f0e", "Ian"="#2ca02c"),
   domain  = hurricanes$NAME
 )
-
 pal_effect <- colorBin(
   palette = "YlOrRd",
   domain  = c(0, max_count),
@@ -149,6 +146,8 @@ ui <- page_fillable(
       body { overflow-y: hidden; }
       .grid { display: grid; grid-template-columns: 48% 52%; height: 100vh; }
       #map { height: 100vh; }
+      /* hide layers control whenever the wrapper carries .hide-layers */
+      #mapwrap.hide-layers .leaflet-control-layers { display: none !important; }
       .rhs { position: relative; height: 100vh; display:flex; flex-direction:column; }
       .progress-wrap { height: 6px; background: #e9ecef; position: sticky; top: 0; z-index: 5; }
       .progress-bar { height: 100%; width: 0%; background: #1f77b4; transition: width 200ms ease; }
@@ -168,6 +167,9 @@ ui <- page_fillable(
         const list   = document.querySelector('.chapters');
         const items  = Array.from(document.querySelectorAll('.chapter'));
         const bar    = document.querySelector('.progress-bar');
+        const mapwrap= document.getElementById('mapwrap');
+        // hide control by default
+        if (mapwrap) mapwrap.classList.add('hide-layers');
 
         function setActiveById(id){
           items.forEach(el => el.classList.toggle('active', el.dataset.id === id));
@@ -195,12 +197,22 @@ ui <- page_fillable(
           if (nextKeys.includes(ev.key) && active < items.length-1) setActiveById(items[active+1].dataset.id);
         });
 
+        // allow server to toggle visibility by adding/removing the wrapper class
+        if (window.Shiny) {
+          Shiny.addCustomMessageHandler('layersCtlVisible', function(show){
+            if (!mapwrap) return;
+            mapwrap.classList.toggle('hide-layers', !show);
+          });
+        }
+
         setTimeout(()=>setActiveById(items[0].dataset.id), 50);
       });
     "))
   ),
   div(class="grid",
-      leafletOutput("map", height = "100%"),
+      div(id="mapwrap", class="hide-layers",   # wrapper controls visibility of the layers toggle
+          leafletOutput("map", height = "100%")
+      ),
       div(class="rhs",
           div(class="progress-wrap", div(class="progress-bar")),
           div(class="chapters",
@@ -315,13 +327,14 @@ server <- function(input, output, session){
     ch <- chapters[chapters$id == input$current_chapter, , drop = FALSE]
     if (!nrow(ch)) return(NULL)
     
-    # Hide all overlays & remove any legends/controls
+    # Hide all overlays & remove any legends/controls; also hide the control by CSS class
     proxy <- leafletProxy("map") %>%
       flyTo(lng = ch$lng[[1]], lat = ch$lat[[1]], zoom = ch$zoom[[1]]) %>%
       hideGroup("storms") %>% hideGroup("mort") %>%
       hideGroup("ZCTA: Threat") %>% hideGroup("ZCTA: Impact") %>% hideGroup("ZCTA: Cleanup") %>%
       hideGroup("RR: Threat") %>% hideGroup("RR: Impact") %>% hideGroup("RR: Cleanup") %>%
       clearControls()
+    session$sendCustomMessage("layersCtlVisible", FALSE)
     
     id <- ch$id[[1]]
     if (id == "storms") {
@@ -341,6 +354,7 @@ server <- function(input, output, session){
           overlayGroups = c("ZCTA: Threat", "ZCTA: Impact", "ZCTA: Cleanup"),
           options = layersControlOptions(collapsed = FALSE)
         )
+      session$sendCustomMessage("layersCtlVisible", TRUE)
       
     } else if (id == "model") {
       proxy %>%
@@ -351,9 +365,10 @@ server <- function(input, output, session){
           overlayGroups = c("RR: Threat", "RR: Impact", "RR: Cleanup"),
           options = layersControlOptions(collapsed = FALSE)
         )
+      session$sendCustomMessage("layersCtlVisible", TRUE)
       
     } else if (id %in% c("hotspots", "intro")) {
-      # cleared map: nothing to add
+      # cleared map: nothing to add; control remains hidden via wrapper class
     }
   })
   
