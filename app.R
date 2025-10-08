@@ -142,72 +142,139 @@ FL_XMIN <- -87.7; FL_XMAX <- -79.8; FL_YMIN <- 24.3; FL_YMAX <- 31.1
 ui <- page_fillable(
   theme = bs_theme(version = 5, bootswatch = "flatly"),
   tags$head(
+    # ---------- LAYOUT / STYLE ----------
     tags$style(HTML("
-      body { overflow-y: hidden; }
-      .grid { display: grid; grid-template-columns: 48% 52%; height: 100vh; }
-      #map { height: 100vh; }
-      /* hide layers control whenever the wrapper carries .hide-layers */
-      #mapwrap.hide-layers .leaflet-control-layers { display: none !important; }
-      .rhs { position: relative; height: 100vh; display:flex; flex-direction:column; }
-      .progress-wrap { height: 6px; background: #e9ecef; position: sticky; top: 0; z-index: 5; }
-      .progress-bar { height: 100%; width: 0%; background: #1f77b4; transition: width 200ms ease; }
-      .chapters { overflow-y: auto; padding: 1rem 1.25rem; flex: 1; background: #fff; }
-      .chapter { margin: 1.25rem 0; padding: 1rem; border-left: 4px solid #e5e7eb; cursor: pointer;
-                 border-radius: 0.25rem; background: #fff; }
-      .chapter:hover { background: #f8fbff; }
-      .chapter.active { border-left-color: #1f77b4; background: #f4f9ff; }
-      .nav-controls { display:flex; justify-content: space-between; gap: .5rem; padding: .75rem 1rem;
-                      border-top: 1px solid #edf2f7; background:#fff; position: sticky; bottom: 0; z-index: 4; }
-      .nav-controls .btn { border-radius: 9999px; }
-      h2 { margin: 0 0 .25rem 0; font-size: 1.1rem; }
-      p { margin: 0; }
-    ")),
+    /* --- Global type scale (slightly smaller) --- */
+    :root{ --app-font-size: 15px; }
+    html { font-size: var(--app-font-size); }
+    @media (min-width: 1440px){ :root{ --app-font-size: 15.5px; } }
+
+    body { overflow-y: hidden; }
+
+    /* --- Two-column layout with padding + gap --- */
+    .grid {
+      display: grid;
+      grid-template-columns: 52% 48%;
+      gap: 14px;                     /* space between map and text */
+      padding: 10px 14px;            /* page gutters */
+      height: 100vh;
+      box-sizing: border-box;
+    }
+
+    /* --- Map wrapper adds a soft inset and notches the left edge --- */
+    #mapwrap {
+      padding: 8px;
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 1px 6px rgba(0,0,0,.08);
+    }
+    /* Let the map fill the wrapper (not the whole viewport) */
+    #map { height: 100%; }           /* was 100vh */
+    #mapwrap .leaflet-container { border-radius: 10px; }
+
+    .rhs { position: relative; height: 100%; display:flex; flex-direction:column; }
+
+    .progress-wrap { height: 6px; background: #e9ecef; position: sticky; top: 0; z-index: 5; }
+    .progress-bar  { height: 100%; width: 0%; background: #1f77b4; transition: width 200ms ease; }
+
+    .chapters {
+      overflow-y: auto; padding: 0.8rem 1rem; flex: 1; background: #fff;
+      font-size: 0.95rem; line-height: 1.35;
+    }
+
+    .chapter {
+      margin: 0.9rem 0; padding: 0.85rem;
+      border-left: 4px solid #e5e7eb; cursor: pointer;
+      border-radius: 6px; background: #fff;
+    }
+    .chapter:hover  { background: #f8fbff; }
+    .chapter.active { border-left-color: #1f77b4; background: #f4f9ff; }
+    .chapter h2     { margin: 0 0 .35rem 0; font-size: 1rem; }
+    .chapter p      { margin: 0; font-size: 0.95rem; }
+
+    .nav-controls {
+      display:flex; justify-content: space-between; gap: .5rem;
+      padding: .6rem .9rem; border-top: 1px solid #edf2f7; background:#fff;
+      position: sticky; bottom: 0; z-index: 4;
+    }
+    .nav-controls .btn { border-radius: 9999px; font-size: .9rem; padding: .4rem .9rem; }
+
+    /* Layers control visibility via wrapper class */
+    #mapwrap.hide-layers .leaflet-control-layers { display: none !important; }
+  ")),
+    
+    # ---------- BEHAVIOR / JS ----------
     tags$script(HTML("
-      document.addEventListener('DOMContentLoaded', function () {
-        const list   = document.querySelector('.chapters');
-        const items  = Array.from(document.querySelectorAll('.chapter'));
-        const bar    = document.querySelector('.progress-bar');
-        const mapwrap= document.getElementById('mapwrap');
-        // hide control by default
-        if (mapwrap) mapwrap.classList.add('hide-layers');
+    document.addEventListener('DOMContentLoaded', function () {
+      const list    = document.querySelector('.chapters');
+      const items   = Array.from(document.querySelectorAll('.chapter'));
+      const bar     = document.querySelector('.progress-bar');
+      const mapwrap = document.getElementById('mapwrap');
 
-        function setActiveById(id){
-          items.forEach(el => el.classList.toggle('active', el.dataset.id === id));
-          const idx = items.findIndex(el => el.dataset.id === id);
-          const el  = items[idx];
-          if (el) el.scrollIntoView({block:'center', behavior:'smooth'});
-          if (window.Shiny) Shiny.setInputValue('current_chapter', id, {priority:'event'});
-          if (idx >= 0) bar.style.width = Math.round(((idx+1) / items.length) * 100) + '%';
+      // Hide the layer control by default
+      if (mapwrap) mapwrap.classList.add('hide-layers');
+
+      // Suppress intersection callbacks briefly after programmatic jumps
+      let ignoreUntil = 0; // ms timestamp
+
+      function setActiveById(id, opts){
+        opts = opts || {};
+        items.forEach(el => el.classList.toggle('active', el.dataset.id === id));
+        const idx = items.findIndex(el => el.dataset.id === id);
+        const el  = items[idx];
+
+        if (el && opts.scroll !== false) {
+          el.scrollIntoView({block:'center', behavior:'smooth'});
         }
+        // Block IntersectionObserver for a short period so we don't double-advance
+        ignoreUntil = Date.now() + 400;
 
-        items.forEach(el => el.addEventListener('click', () => setActiveById(el.dataset.id)));
+        if (window.Shiny) Shiny.setInputValue('current_chapter', id, {priority:'event'});
+        if (idx >= 0 && bar) bar.style.width = Math.round(((idx+1) / items.length) * 100) + '%';
+      }
 
+      // Click on chapter cards
+      items.forEach(el => el.addEventListener('click', () => setActiveById(el.dataset.id)));
+
+      // Scroll-activate (when ~60% visible) — but not during the ignore window
+      if (list) {
         const obs = new IntersectionObserver((entries)=>{
-          entries.forEach(e=>{ if(e.isIntersecting) setActiveById(e.target.dataset.id); });
+          if (Date.now() < ignoreUntil) return;
+          entries.forEach(e => { if (e.isIntersecting) setActiveById(e.target.dataset.id, {scroll:false}); });
         }, {root: list, threshold: 0.6});
         items.forEach(el => obs.observe(el));
+      }
 
-        document.addEventListener('keydown', (ev)=>{
-          const prevKeys = ['ArrowUp','ArrowLeft','PageUp'];
-          const nextKeys = ['ArrowDown','ArrowRight','PageDown',' '];
-          if (![...prevKeys,...nextKeys].includes(ev.key)) return;
-          ev.preventDefault();
-          const active = items.findIndex(x => x.classList.contains('active'));
-          if (prevKeys.includes(ev.key) && active > 0) setActiveById(items[active-1].dataset.id);
-          if (nextKeys.includes(ev.key) && active < items.length-1) setActiveById(items[active+1].dataset.id);
-        });
-
-        // allow server to toggle visibility by adding/removing the wrapper class
-        if (window.Shiny) {
-          Shiny.addCustomMessageHandler('layersCtlVisible', function(show){
-            if (!mapwrap) return;
-            mapwrap.classList.toggle('hide-layers', !show);
-          });
-        }
-
-        setTimeout(()=>setActiveById(items[0].dataset.id), 50);
+      // Keyboard navigation
+      document.addEventListener('keydown', (ev)=>{
+        const prevKeys = ['ArrowUp','ArrowLeft','PageUp'];
+        const nextKeys = ['ArrowDown','ArrowRight','PageDown',' '];
+        if (![...prevKeys, ...nextKeys].includes(ev.key)) return;
+        ev.preventDefault();
+        const active = items.findIndex(x => x.classList.contains('active'));
+        if (prevKeys.includes(ev.key) && active > 0) setActiveById(items[active-1].dataset.id);
+        if (nextKeys.includes(ev.key) && active < items.length-1) setActiveById(items[active+1].dataset.id);
       });
-    "))
+
+      // Server -> client handlers
+      function registerHandlers(){
+        Shiny.addCustomMessageHandler('goChapter', function(dir){
+          const active = items.findIndex(x => x.classList.contains('active'));
+          if (dir === 'prev' && active > 0) setActiveById(items[active-1].dataset.id);
+          if (dir === 'next' && active < items.length-1) setActiveById(items[active+1].dataset.id);
+        });
+        Shiny.addCustomMessageHandler('layersCtlVisible', function(show){
+          if (!mapwrap) return;
+          mapwrap.classList.toggle('hide-layers', !show);
+        });
+      }
+      if (window.Shiny) registerHandlers();
+      else document.addEventListener('shiny:connected', registerHandlers, {once:true});
+
+      // Initialize first active
+      if (items.length) setTimeout(()=>setActiveById(items[0].dataset.id), 50);
+    });
+  "))
   ),
   div(class="grid",
       div(id="mapwrap", class="hide-layers",   # wrapper controls visibility of the layers toggle
